@@ -8,10 +8,10 @@ with open('./requirements.txt') as r:
     requirements = [line.split('=', 1)[0] for line in r]
 
 setup(
-    name='longhorn-client-python',
+    name='gdapi-python',
     version='0.5.3',
-    py_modules=['lhapi'],
-    url='https://github.com/PhanLe1010/longhorn-client-python.git',
+    py_modules=['gdapi'],
+    url='https://github.com/godaddy/gdapi-python',
     license='MIT Style',
     author='Darren Shepherd',
     author_email='darren.s.shepherd@gmail.com',
