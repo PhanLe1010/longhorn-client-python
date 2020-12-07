@@ -940,15 +940,14 @@ def from_env(prefix='CATTLE_', **kw):
 
 
 def _main():
-    print("hahahaha")
-    # import sys
-    # client = _cli_client(sys.argv)
-    # if not client.valid():
-    #     _general_args().print_help()
-    #     sys.exit(2)
+    import sys
+    client = _cli_client(sys.argv)
+    if not client.valid():
+        _general_args().print_help()
+        sys.exit(2)
 
-    # args = _full_args(client).parse_args()
-    # _run_cli(client, args)
+    args = _full_args(client).parse_args()
+    _run_cli(client, args)
 
 if __name__ == '__main__':
     _main()
