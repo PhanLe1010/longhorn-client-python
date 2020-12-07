@@ -11,7 +11,7 @@ setup(
     name='gdapi-python',
     version='0.5.3',
     py_modules=['gdapi'],
-    url='https://github.com/godaddy/gdapi-python',
+    url='https://github.com/PhanLe1010/longhorn-client-python.git',
     license='MIT Style',
     author='Darren Shepherd',
     author_email='darren.s.shepherd@gmail.com',
