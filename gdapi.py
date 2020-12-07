@@ -950,4 +950,4 @@ def _main():
     _run_cli(client, args)
 
 if __name__ == '__main__':
-    _main()
+    print("hahaha")
