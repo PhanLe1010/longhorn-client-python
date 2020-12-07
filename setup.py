@@ -9,7 +9,7 @@ with open('./requirements.txt') as r:
 
 setup(
     name='longhorn-client-python',
-    version='0.0.1',
+    version='0.1.0',
     py_modules=['lhclient'],
     url='https://github.com/PhanLe1010/longhorn-client-python.git',
     license='MIT Style',
