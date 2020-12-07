@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 from __future__ import print_function
 import six
@@ -10,10 +9,18 @@ import hashlib
 import os
 import json
 import time
+import operator
+from functools import reduce
+
 try:
     import argcomplete
 except ImportError:
     pass
+# {{{ http://code.activestate.com/recipes/267662/ (r7)
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from io import StringIO
 
 
 def _prefix(cmd):
@@ -21,6 +28,7 @@ def _prefix(cmd):
     for i in ['.pyc', '.py', '-cli', '-tool', '-util']:
         prefix = prefix.replace(i, '')
     return prefix.upper()
+
 
 PREFIX = _prefix(__file__)
 CACHE_DIR = '~/.' + PREFIX.lower()
@@ -42,6 +50,8 @@ DELETE_METHOD = 'DELETE'
 HEADERS = {'Accept': 'application/json'}
 
 LIST_METHODS = {'__iter__': True, '__len__': True, '__getitem__': True}
+
+DEFAULT_TIMEOUT = 45
 
 
 def echo(fn):
@@ -106,6 +116,18 @@ class RestObject:
                 data[k] = v
         return repr(data)
 
+    def __len__(self):
+        if self._is_list():
+            return len(self.data)
+        return len(self.__dict__)
+
+    def __getitem__(self, key):
+        if not self:
+            return None
+        if self._is_list():
+            return self.data[key]
+        return self.__dict__[key]
+
     def __getattr__(self, k):
         if self._is_list() and k in LIST_METHODS:
             return getattr(self.data, k)
@@ -114,6 +136,7 @@ class RestObject:
     def __iter__(self):
         if self._is_list():
             return iter(self.data)
+        return iter(self.__dict__)
 
 
 class Schema(object):
@@ -129,28 +152,28 @@ class Schema(object):
             try:
                 if POST_METHOD in t.collectionMethods:
                     t.creatable = True
-            except:
+            except Exception:
                 pass
 
             t.updatable = False
             try:
                 if PUT_METHOD in t.resourceMethods:
                     t.updatable = True
-            except:
+            except Exception:
                 pass
 
             t.deletable = False
             try:
                 if DELETE_METHOD in t.resourceMethods:
                     t.deletable = True
-            except:
+            except Exception:
                 pass
 
             t.listable = False
             try:
                 if GET_METHOD in t.collectionMethods:
                     t.listable = True
-            except:
+            except Exception:
                 pass
 
             if not hasattr(t, 'collectionFilters'):
@@ -164,12 +187,16 @@ class Schema(object):
 
 
 class ApiError(Exception):
-    def __init__(self, obj):
+    def __init__(self, obj, status_code):
+        if not obj:
+            obj = RestObject()
+            obj.message = ""
+        obj.code = status_code
         self.error = obj
         try:
             msg = '{} : {}\n{}'.format(obj.code, obj.message, obj)
             super(ApiError, self).__init__(self, msg)
-        except:
+        except Exception:
             super(ApiError, self).__init__(self, 'API Error')
 
 
@@ -177,8 +204,8 @@ class ClientApiError(Exception):
     pass
 
 
-class Client(object):
-    def __init__(self, access_key=None, secret_key=None, url=None, cache=False,
+class GdapiClient(object):
+    def __init__(self, access_key="", secret_key="", url=None, cache=False,
                  cache_time=86400, strict=False, headers=HEADERS, **kw):
         self._headers = headers
         self._access_key = access_key
@@ -221,8 +248,8 @@ class Client(object):
                                                       six.string_types):
                 if hasattr(result, 'links'):
                     for link_name, link in six.iteritems(result.links):
-                        cb = lambda _link=link, **kw: self._get(_link,
-                                                                data=kw)
+                        def cb(_link=link, **kw):
+                            return self._get(_link, data=kw)
                         if hasattr(result, link_name):
                             setattr(result, link_name + '_link', cb)
                         else:
@@ -230,9 +257,10 @@ class Client(object):
 
                 if hasattr(result, 'actions'):
                     for link_name, link in six.iteritems(result.actions):
-                        cb = lambda _link_name=link_name, _result=result, \
-                            *args, **kw: self.action(_result, _link_name,
-                                                     *args, **kw)
+                        def cb(_link_name=link_name,
+                               _result=result, *args, **kw):
+                            return self.action(_result, _link_name,
+                                               *args, **kw)
                         if hasattr(result, link_name):
                             setattr(result, link_name + '_action', cb)
                         else:
@@ -251,8 +279,8 @@ class Client(object):
     def _get(self, url, data=None):
         return self._unmarshall(self._get_raw(url, data=data))
 
-    def _error(self, text):
-        raise ApiError(self._unmarshall(text))
+    def _error(self, text, status_code):
+        raise ApiError(self._unmarshall(text), status_code)
 
     @timed_url
     def _get_raw(self, url, data=None):
@@ -263,7 +291,7 @@ class Client(object):
         r = self._session.get(url, auth=self._auth, params=data,
                               headers=self._headers)
         if r.status_code < 200 or r.status_code >= 300:
-            self._error(r.text)
+            self._error(r.text, r.status_code)
 
         return r
 
@@ -272,7 +300,7 @@ class Client(object):
         r = self._session.post(url, auth=self._auth, data=self._marshall(data),
                                headers=self._headers)
         if r.status_code < 200 or r.status_code >= 300:
-            self._error(r.text)
+            self._error(r.text, r.status_code)
 
         return self._unmarshall(r.text)
 
@@ -281,7 +309,7 @@ class Client(object):
         r = self._session.put(url, auth=self._auth, data=self._marshall(data),
                               headers=self._headers)
         if r.status_code < 200 or r.status_code >= 300:
-            self._error(r.text)
+            self._error(r.text, r.status_code)
 
         return self._unmarshall(r.text)
 
@@ -289,7 +317,7 @@ class Client(object):
     def _delete(self, url):
         r = self._session.delete(url, auth=self._auth, headers=self._headers)
         if r.status_code < 200 or r.status_code >= 300:
-            self._error(r.text)
+            self._error(r.text, r.status_code)
 
         return self._unmarshall(r.text)
 
@@ -341,7 +369,7 @@ class Client(object):
         try:
             return self._get(url, self._to_dict(**kw))
         except ApiError as e:
-            if e.error.status == 404:
+            if e.error.code == 404:
                 return None
             else:
                 raise e
@@ -366,7 +394,7 @@ class Client(object):
             try:
                 return self._put(url, data=self._to_dict(*args, **kw))
             except ApiError as e:
-                if e.error.status == 409:
+                if e.error.code == 409:
                     last_error = e
                     time.sleep(.1)
                 else:
@@ -380,7 +408,7 @@ class Client(object):
             try:
                 return self._post(url, data=self._to_dict(*args, **kw))
             except ApiError as e:
-                if e.error.status == 409:
+                if e.error.code == 409:
                     last_error = e
                     time.sleep(.1)
                 else:
@@ -453,7 +481,7 @@ class Client(object):
 
         if isinstance(value, RestObject):
             ret = {}
-            for k, v in vars(value).iteritems():
+            for k, v in vars(value).items():
                 if not k.startswith('_') and \
                         not isinstance(v, RestObject) and not callable(v):
                     ret[k] = self._to_value(v)
@@ -505,8 +533,9 @@ class Client(object):
                 for method_name, type_collection, test_method, m in bindings:
                     # double lambda for lexical binding hack, I'm sure there's
                     # a better way to do this
-                    cb = lambda type_name=type_name, method=m: \
-                        lambda *args, **kw: method(type_name, *args, **kw)
+                    def cb(type_name=type_name, method=m):
+                        return lambda *args, **kw: \
+                            method(type_name, *args, **kw)
                     if test_method in getattr(typ, type_collection, []):
                         setattr(self, '_'.join([method_name, name_variant]),
                                 cb())
@@ -572,58 +601,51 @@ def _print_cli(client, obj):
     else:
         print(obj)
 
-# {{{ http://code.activestate.com/recipes/267662/ (r7)
-try:
-    from cStringIO import StringIO
-except ImportError:
-    from io import StringIO
-import operator
-
 
 def indent(rows, hasHeader=False, headerChar='-', delim=' | ', justify='left',
            separateRows=False, prefix='', postfix='', wrapfunc=lambda x: x):
-        '''Indents a table by column.
-             - rows: A sequence of sequences of items, one sequence per row.
-             - hasHeader: True if the first row consists of the columns' names.
-             - headerChar: Character to be used for the row separator line
-                 (if hasHeader==True or separateRows==True).
-             - delim: The column delimiter.
-             - justify: Determines how are data justified in their column.
-                 Valid values are 'left','right' and 'center'.
-             - separateRows: True if rows are to be separated by a line
-                 of 'headerChar's.
-             - prefix: A string prepended to each printed row.
-             - postfix: A string appended to each printed row.
-             - wrapfunc: A function f(text) for wrapping text; each element in
-                 the table is first wrapped by this function.'''
-        # closure for breaking logical rows to physical, using wrapfunc
-        def rowWrapper(row):
-                newRows = [wrapfunc(item).split('\n') for item in row]
-                return [[substr or '' for substr in item] for item in map(None, *newRows)]  # NOQA
-        # break each logical row into one or more physical ones
-        logicalRows = [rowWrapper(row) for row in rows]
-        # columns of physical rows
-        columns = map(None, *reduce(operator.add, logicalRows))
-        # get the maximum of each column by the string length of its items
-        maxWidths = [max([len(str(item)) for item in column])
-                     for column in columns]
-        rowSeparator = headerChar * (len(prefix) + len(postfix) +
-                                     sum(maxWidths) +
-                                     len(delim)*(len(maxWidths)-1))
-        # select the appropriate justify method
-        justify = {'center': str.center, 'right': str.rjust, 'left': str.ljust}[justify.lower()]  # NOQA
-        output = StringIO()
-        if separateRows:
+    '''Indents a table by column.
+         - rows: A sequence of sequences of items, one sequence per row.
+         - hasHeader: True if the first row consists of the columns' names.
+         - headerChar: Character to be used for the row separator line
+             (if hasHeader==True or separateRows==True).
+         - delim: The column delimiter.
+         - justify: Determines how are data justified in their column.
+             Valid values are 'left','right' and 'center'.
+         - separateRows: True if rows are to be separated by a line
+             of 'headerChar's.
+         - prefix: A string prepended to each printed row.
+         - postfix: A string appended to each printed row.
+         - wrapfunc: A function f(text) for wrapping text; each element in
+             the table is first wrapped by this function.'''
+    # closure for breaking logical rows to physical, using wrapfunc
+    def rowWrapper(row):
+        newRows = [wrapfunc(item).split('\n') for item in row]
+        return [[substr or '' for substr in item] for item in map(None, *newRows)]  # NOQA
+    # break each logical row into one or more physical ones
+    logicalRows = [rowWrapper(row) for row in rows]
+    # columns of physical rows
+    columns = map(None, *reduce(operator.add, logicalRows))
+    # get the maximum of each column by the string length of its items
+    maxWidths = [max([len(str(item)) for item in column])
+                 for column in columns]
+    rowSeparator = headerChar * (len(prefix) + len(postfix) +
+                                 sum(maxWidths) +
+                                 len(delim)*(len(maxWidths)-1))
+    # select the appropriate justify method
+    justify = {'center': str.center, 'right': str.rjust, 'left': str.ljust}[justify.lower()]  # NOQA
+    output = StringIO()
+    if separateRows:
+        print(rowSeparator, file=output)
+    for physicalRows in logicalRows:
+        for row in physicalRows:
+            print(prefix
+                  + delim.join([justify(str(item), width) for (item, width) in zip(row, maxWidths)]) + postfix,  # NOQA
+                  file=output)
+        if separateRows or hasHeader:
             print(rowSeparator, file=output)
-        for physicalRows in logicalRows:
-            for row in physicalRows:
-                print(prefix
-                        + delim.join([justify(str(item), width) for (item, width) in zip(row, maxWidths)]) + postfix,  # NOQA
-                    file=output)
-            if separateRows or hasHeader:
-                print(rowSeparator, file=output)
-                hasHeader = False
-        return output.getvalue()
+            hasHeader = False
+    return output.getvalue()
 # End {{{ http://code.activestate.com/recipes/267662/ (r7)
 
 
@@ -631,7 +653,7 @@ def _env_prefix(cmd):
     return _prefix(cmd) + '_'
 
 
-def from_env(prefix=PREFIX + '_', factory=Client, **kw):
+def gdapi_from_env(prefix=PREFIX + '_', factory=GdapiClient, **kw):
     args = dict((x, None) for x in ['access_key', 'secret_key', 'url', 'cache',
                                     'cache_time', 'strict'])
     args.update(kw)
@@ -641,7 +663,7 @@ def from_env(prefix=PREFIX + '_', factory=Client, **kw):
     return _from_env(prefix=prefix, factory=factory, **args)
 
 
-def _from_env(prefix=PREFIX + '_', factory=Client, **kw):
+def _from_env(prefix=PREFIX + '_', factory=GdapiClient, **kw):
     result = dict(kw)
     for k, v in six.iteritems(kw):
         if v is not None:
@@ -820,7 +842,7 @@ def _run_cli(client, namespace):
         import sys
 
         sys.stderr.write('Error : {}\n'.format(e.error))
-        status = int(e.error.status) - 400
+        status = int(e.error.code) - 400
         if status > 0 and status < 255:
             sys.exit(status)
         else:
@@ -873,6 +895,48 @@ def _cli_client(argv):
 
     prefix = _env_prefix(argv[0])
     return _from_env(prefix, **dict_args)
+
+
+# cattle-cli
+class Client(GdapiClient):
+    def __init__(self, *args, **kw):
+        super(Client, self).__init__(*args, **kw)
+
+    def wait_success(self, obj, timeout=-1):
+        obj = self.wait_transitioning(obj, timeout)
+        if obj.transitioning != 'no':
+            raise ClientApiError(obj.transitioningMessage)
+        return obj
+
+    def wait_transitioning(self, obj, timeout=-1, sleep=0.01):
+        timeout = _get_timeout(timeout)
+        start = time.time()
+        obj = self.reload(obj)
+        while obj.transitioning == 'yes':
+            time.sleep(sleep)
+            sleep *= 2
+            if sleep > 2:
+                sleep = 2
+            obj = self.reload(obj)
+            delta = time.time() - start
+            if delta > timeout:
+                msg = \
+                    'Timeout waiting for [{}:{}] to be done after {} seconds'.\
+                    format(obj.type, obj.id, delta)
+                raise Exception(msg)
+
+        return obj
+
+
+def _get_timeout(timeout):
+    if timeout == -1:
+        return DEFAULT_TIMEOUT
+    return timeout
+
+
+def from_env(prefix='CATTLE_', **kw):
+    return gdapi_from_env(prefix=prefix, factory=Client, **kw)
+
 
 
 def _main():
